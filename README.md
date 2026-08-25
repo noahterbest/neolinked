@@ -1,7 +1,32 @@
-# Neolink
+# Neolinked
 
-![CI](https://github.com/QuantumEntangledAndy/neolink/workflows/CI/badge.svg)
-[![dependency status](https://deps.rs/repo/github/QuantumEntangledAndy/neolink/status.svg)](https://deps.rs/repo/github/QuantumEntangledAndy/neolink)
+![CI](https://github.com/noahterbest/neolinked/workflows/CI/badge.svg)
+
+This is a maintained fork of
+[QuantumEntangledAndy/neolink](https://github.com/QuantumEntangledAndy/neolink)
+(dormant since January 2025) carrying fixes for the long-standing memory/file
+descriptor leaks and frozen-stream failures (upstream issues
+[#286](https://github.com/QuantumEntangledAndy/neolink/issues/286),
+[#349](https://github.com/QuantumEntangledAndy/neolink/issues/349),
+[#366](https://github.com/QuantumEntangledAndy/neolink/issues/366),
+[#370](https://github.com/QuantumEntangledAndy/neolink/issues/370)):
+
+- Shared per-mount GStreamer pipelines and camera sessions
+  (upstream [PR #400](https://github.com/QuantumEntangledAndy/neolink/pull/400))
+- No more per-frame-size buffer pools (upstream
+  [PR #340](https://github.com/QuantumEntangledAndy/neolink/pull/340)/[#373](https://github.com/QuantumEntangledAndy/neolink/pull/373))
+- Bounded appsrc queues (`leaky-type=downstream`), bounded UDP
+  reorder/resend buffers with lost-packet skip, hardened length parsing
+- A 30s no-frames watchdog that forces a camera reconnect instead of
+  freezing until restart, plus assorted task-leak fixes
+
+Docker images are published to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/noahterbest/neolinked:latest
+```
+
+---
 
 Neolink is a small program that acts as a proxy between Reolink IP cameras and
 normal RTSP clients.
