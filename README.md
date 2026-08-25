@@ -2,77 +2,115 @@
 
 ![CI](https://github.com/noahterbest/neolinked/workflows/CI/badge.svg)
 
-This is a maintained fork of
-[QuantumEntangledAndy/neolink](https://github.com/QuantumEntangledAndy/neolink)
-(dormant since January 2025) carrying fixes for the long-standing memory/file
-descriptor leaks and frozen-stream failures (upstream issues
+Neolinked is a small program that acts as a proxy between Reolink IP cameras and
+normal RTSP clients.
+Certain cameras, such as the Reolink B800, do not implement ONVIF or RTSP, but
+instead use a proprietary "Baichuan" protocol only compatible with their apps
+and NVRs (any camera that uses "port 9000" will likely be using this protocol).
+Neolinked allows you to use NVR software such as Frigate, Shinobi or Blue Iris
+to receive video from these cameras instead.
+The Reolink NVR is not required, and the cameras are unmodified.
+Your NVR software connects to Neolinked, which forwards the video stream from
+the camera.
+
+This project is not affiliated with Reolink in any way; everything it does has
+been reverse engineered.
+
+## About this fork
+
+Neolinked is a maintained fork of
+[QuantumEntangledAndy/neolink](https://github.com/QuantumEntangledAndy/neolink),
+which has been dormant since January 2025 with its long-standing resource leaks
+unfixed. This fork carries those fixes plus a modernised build.
+
+**The repository, Docker image and project are named `neolinked`. The binary,
+the config file format and every command are unchanged (`neolink`), so existing
+configs and scripts keep working — you only need to change where you pull the
+image from.**
+
+### What's fixed here
+
+- **Runaway memory and file descriptor use.** The RTSP path allocated a
+  GStreamer buffer pool for every distinct video frame size and never released
+  them, and every client (including monitoring probes) built its own pipeline
+  and its own camera session. Together these could consume many gigabytes an
+  hour and eventually exhaust file descriptors, which stopped new streams from
+  connecting while the process stayed alive.
+- **Streams that froze until the container was restarted.** A single
+  unrecoverable lost UDP packet could stall a stream permanently while the
+  connection still looked healthy. Lost packets are now skipped, the buffers
+  behind them are bounded, and a watchdog forces a camera reconnect after 30
+  seconds without frames.
+- **Unbounded queues when a client stalls.** Stream buffers now drop old frames
+  at a fixed cap instead of growing at full video bitrate, which also clears the
+  endless `Buffer full on vidsrc` logging.
+- **Robustness.** Hardened parsing of camera-supplied lengths, removal of a
+  remotely triggerable crash, bounded snapshot and push-notification handling,
+  and a number of background tasks that previously leaked per client
+  connection.
+- **Build and delivery.** CI builds `amd64` and `arm64` and publishes images to
+  GitHub Container Registry.
+
+These correspond to upstream issues
 [#286](https://github.com/QuantumEntangledAndy/neolink/issues/286),
 [#349](https://github.com/QuantumEntangledAndy/neolink/issues/349),
-[#366](https://github.com/QuantumEntangledAndy/neolink/issues/366),
-[#370](https://github.com/QuantumEntangledAndy/neolink/issues/370)):
+[#366](https://github.com/QuantumEntangledAndy/neolink/issues/366) and
+[#370](https://github.com/QuantumEntangledAndy/neolink/issues/370), and include
+the approaches from upstream pull requests
+[#340](https://github.com/QuantumEntangledAndy/neolink/pull/340)/[#373](https://github.com/QuantumEntangledAndy/neolink/pull/373)
+and [#400](https://github.com/QuantumEntangledAndy/neolink/pull/400), none of
+which were ever merged upstream.
 
-- Shared per-mount GStreamer pipelines and camera sessions
-  (upstream [PR #400](https://github.com/QuantumEntangledAndy/neolink/pull/400))
-- No more per-frame-size buffer pools (upstream
-  [PR #340](https://github.com/QuantumEntangledAndy/neolink/pull/340)/[#373](https://github.com/QuantumEntangledAndy/neolink/pull/373))
-- Bounded appsrc queues (`leaky-type=downstream`), bounded UDP
-  reorder/resend buffers with lost-packet skip, hardened length parsing
-- A 30s no-frames watchdog that forces a camera reconnect instead of
-  freezing until restart, plus assorted task-leak fixes
+### Features inherited from upstream
 
-Docker images are published to GitHub Container Registry:
+- MQTT
+- Motion detection
+- Paused streams (when no rtsp client or no motion detected)
+- Save a still image to disk
+- Multiple ways to reach a camera, including relaying through Reolink servers
+- Camera battery levels in the log
+
+## Installation
+
+### Docker (recommended)
+
+Multi-architecture images (`amd64`, `arm64`) are published to GitHub Container
+Registry. The `latest` tag tracks `master`.
 
 ```bash
 docker pull ghcr.io/noahterbest/neolinked:latest
 ```
 
----
+```bash
+# Add `-e "RUST_LOG=debug"` to run with debug logs
+#
+# --network host is only needed if you require to connect
+# via local broadcasts. If you can connect via any other
+# method then normal bridge mode should work fine
+# and you can omit this option.
+docker run --network host \
+  --memory=1g --restart=unless-stopped \
+  --volume=$PWD/config.toml:/etc/neolink.toml \
+  ghcr.io/noahterbest/neolinked:latest
+```
 
-Neolink is a small program that acts as a proxy between Reolink IP cameras and
-normal RTSP clients.
-Certain cameras, such as the Reolink B800, do not implement ONVIF or RTSP, but
-instead use a proprietary "Baichuan" protocol only compatible with their apps
-and NVRs (any camera that uses "port 9000" will likely be using this protocol).
-Neolink allows you to use NVR software such as Shinobi or Blue Iris to receive
-video from these cameras instead.
-The Reolink NVR is not required, and the cameras are unmodified.
-Your NVR software connects to Neolink, which forwards the video stream from the
-camera.
+On **Unraid**, set the container's *Repository* field to
+`ghcr.io/noahterbest/neolinked:latest`. All other template settings (config
+path, ports, network) carry over unchanged.
 
-The Neolink project is not affiliated with Reolink in any way; everything it
-does has been reverse engineered.
+The `--memory` limit and restart policy above are a safety net, not a
+requirement — a healthy install should sit in the tens of megabytes.
 
-## This Fork
+#### Environment variables
 
-This fork is an extension of
-[thirtythreeforty's](https://github.com/thirtythreeforty/neolink) with additional
-features not yet in upstream master.
+- `NEO_LINK_MODE`: defaults to `"rtsp"`, other options are `"mqtt"` or
+  `"mqtt-rtsp"`.
+- `NEO_LINK_PORT`: defaults to `8554`, set this to your required port value.
 
-**Major Features**:
+### From source
 
-- MQTT
-- Motion Detection
-- Paused Streams (when no rtsp client or no motion detected)
-- Save a still image to disk
-
-**Minor Features**:
-
-- Improved error messages when missing gstreamer plugins
-- Protocol more closely follows official reolink format
-  - Possibly can handle more simulatenous connections
-- More ways to connect to the camera. Including Relaying through reolink
-  servers
-- Camera battery levels can be displayed in the log
-
-## Installation
-
-Download from the
-[release page](https://github.com/QuantumEntangledAndy/neolink/releases)
-
-Extract the zip
-
-Install the latest [gstreamer](https://gstreamer.freedesktop.org/download/)
-(1.20.5 as of writing this).
+Install the latest [gstreamer](https://gstreamer.freedesktop.org/download/),
+then `cargo build --release`.
 
 - **Windows**: ensure you install `full` when prompted in the MSI options.
 - **Mac**: Install the dpkg version on the official gstreamer website over
@@ -98,7 +136,7 @@ sudo apt install \
   `brew install openssl@1.1`
 - **Ubuntu/Debian**: Install the `libssl` package
 
-Make a config file see below.
+Make a config file, see below.
 
 ## Config/Usage
 
@@ -107,7 +145,7 @@ Make a config file see below.
 To use `neolink` you need a config file.
 
 There's a more complete example
-[here](https://github.com/QuantumEntangledAndy/neolink/blob/master/sample_config.toml),
+[here](https://github.com/noahterbest/neolinked/blob/master/sample_config.toml),
 but the following should work as a minimal example.
 
 ```toml
@@ -137,6 +175,18 @@ using the terminal in the same folder the neolink binary is in.
 ./neolink rtsp --config=neolink.toml
 ```
 
+### Recommended settings
+
+- **Give cameras an `address` where you can.** A camera reached by
+  `address = "192.168.1.10:9000"` connects over TCP and skips the UDP transport
+  entirely, which is the more robust path.
+- **Turn off push notifications** with `push_notifications = false` in each
+  `[[cameras]]` section. Google removed the API this relied on, so it can no
+  longer wake cameras — leaving it enabled only produces retry traffic.
+- **Point one consumer at Neolinked** and let it fan out to viewers (Frigate's
+  restream or go2rtc, for example). Each direct client still costs a camera
+  session, and cameras allow only a few.
+
 ### Discovery
 
 To connect to a camera using a UID we need to find the IP address of the camera
@@ -164,9 +214,9 @@ The IP is discovered with four methods
    to neolink. This requires that our IP and reolink are reachable from
    the camera.
 
-4. Relay: In this case we request that reolink relay our connection. Neolink
-   nor the camera need to be able to direcly contact each other. But both
-   neolink and the camera need to be able to contact reolink.
+4. Relay: In this case we request that reolink relay our connection. Neither
+   neolink nor the camera need to be able to directly contact each other. But
+   both neolink and the camera need to be able to contact reolink.
 
 This can be controlled with the config
 
@@ -424,7 +474,7 @@ it from the config
 - **update_time:** Used to FORCE an update on the camera time. Usually it checks
 if it is needed but this
 will force it regardless. (Mostly this was introduced to address a specific
-ssue a user had)
+issue a user had)
 
 - **print_format:** Used for adjusting printing of some values mostly, battery
 messages
@@ -480,9 +530,8 @@ after it stops being used.
 Neolink considers it as being used if there is an active stream running, or
 if there is motion being detected or an mqtt command being run
 
-[Because google remove the api for the push notifications we cannot
-reliably use push notifications to wake up, so motion won't wake
-up neolink anymore]
+Once in the disconnected state, neolink will stay disconnected until there is a
+new requested activation such as a client connecting or an mqtt command.
 
 You can make neolink stop active streams when there are no rtsp clients using
 
@@ -491,40 +540,10 @@ You can make neolink stop active streams when there are no rtsp clients using
   on_client = true # Should pause when no rtsp client
 ```
 
-Once in the disconnected state. Neolink will stay disconnected until there is a
-new requested activation such as a client connecting or an mqtt command
-
-~Neolink will also wake up on push notifications from the camera. These are usually
-sent by the camera on motion or PIR alarms. To disable this you can set
-`push_notifications = false` in the `[[cameras]]` config~
-
-[Google removed the apis we were using for push notifications]
-
-### Docker
-
-[Docker](https://hub.docker.com/r/quantumentangledandy/neolink) builds are also
-provided in multiple architectures. The latest tag tracks master while each
-branch gets it's own tag.
-
-```bash
-docker pull quantumentangledandy/neolink
-
-# Add `-e "RUST_LOG=debug"` to run with debug logs
-#
-# --network host is only needed if you require to connect
-# via local broadcasts. If you can connect via any other
-# method then normal bridge mode should work fine
-# and you can ommit this option. Not all OSes support
-# network=host, notably macos lacks this option.
-docker run --network host --volume=$PWD/config.toml:/etc/neolink.toml quantumentangledandy/neolink
-```
-
-#### Environmental Variables
-
-There are currently 2 environmental variables available as part of the container:
-
-- `NEO_LINK_MODE`: defaults to `"rtsp"` if not set, other options are "mqtt" or "mqtt-rtsp".
-- `NEO_LINK_PORT`: defaults to `8554`, set this to your required port value.
+> **Note:** Waking on push notifications no longer works — Google removed the
+> API it depended on. Motion will not wake a disconnected camera. Set
+> `push_notifications = false` in `[[cameras]]` to avoid the pointless retry
+> traffic.
 
 ### Image
 
@@ -631,16 +650,24 @@ neolink ptz --config=config.toml CameraName zoom 2.5
 
 With 1.0 being normal and 2.5 being 2.5x zoom
 
+## Credits
+
+Neolinked stands on the work of others:
+
+- [thirtythreeforty/neolink](https://github.com/thirtythreeforty/neolink) —
+  George Hilliard, the original project and Baichuan reverse engineering
+- [QuantumEntangledAndy/neolink](https://github.com/QuantumEntangledAndy/neolink)
+  — Andrew King, whose fork added MQTT, motion detection, paused streams and
+  most of the camera features here
+
+If you find the upstream work helpful, consider supporting its author:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G5HOYIZ)
+
 ## License
 
-Neolink is free software, released under the GNU Affero General Public License
-v3.
+Neolinked is free software, released under the GNU Affero General Public
+License v3.
 
 This means that if you incorporate it into a piece of software available over
 the network, you must offer that software's source code to your users.
-
-## Donations
-
-If you find this code helpful please consider supporting development.
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G5HOYIZ)
