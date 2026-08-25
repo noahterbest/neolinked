@@ -65,6 +65,10 @@ impl NeoCamMdThread {
                         },
                     }
                 }
+                // The request channel closing must not end the whole MD
+                // thread (that would drop md_watcher and permanently error
+                // every motion watcher); wait for the cancel token instead
+                futures::future::pending::<()>().await;
                 Ok(())
             } => v,
             v = async {

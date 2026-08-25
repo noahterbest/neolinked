@@ -151,6 +151,9 @@ fn start_pipeline(pipeline: Pipeline) -> Result<()> {
                     "Error from gstreamer when setting the play state {:?} setting to Null instead",
                     err
                 );
+                // A NULL pipeline will never post EOS; without this break the
+                // loop blocks this thread forever
+                break;
             }
             _ => (),
         }

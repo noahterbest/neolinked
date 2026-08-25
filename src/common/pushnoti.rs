@@ -152,8 +152,12 @@ impl PushNotiThread {
                 let fcm_token = fcm_token.clone();
                 let instance = instance.clone();
                 tokio::task::spawn(async move {
-                    let _ = instance
-                        .run_task(|camera| {
+                    // Bounded: on an unreachable camera this would otherwise
+                    // wait forever holding a use permit, and this runs on
+                    // every listener rebuild (at least every 5 minutes)
+                    let _ = timeout(
+                        Duration::from_secs(120),
+                        instance.run_task(|camera| {
                             let fcm_token = fcm_token.clone();
                             let uid = uid.clone();
                             Box::pin(async move {
@@ -166,8 +170,9 @@ impl PushNotiThread {
                                 r?;
                                 AnyResult::Ok(())
                             })
-                        })
-                        .await;
+                        }),
+                    )
+                    .await;
                 });
             }
 
@@ -233,9 +238,17 @@ impl PushNotiThread {
                             PnRequest::Activate{instance, sender} => {
                                 let uid = uid.clone();
                                 let fcm_token = fcm_token.clone();
-                                self.registed_cameras.insert(uid.clone(), instance.clone());
+                                // Key by camera name: the FCM uid is derived from
+                                // the token and is identical for every camera, so
+                                // keying by it kept only the most recently
+                                // activated camera registered for re-registration
+                                let cam_key = match instance.config().await {
+                                    Ok(config) => config.borrow().name.clone(),
+                                    Err(_) => format!("unknown-{}", self.registed_cameras.len()),
+                                };
+                                self.registed_cameras.insert(cam_key, instance.clone());
                                 tokio::task::spawn(async move {
-                                    let r = instance.run_task(|camera| {
+                                    let r = match timeout(Duration::from_secs(120), instance.run_task(|camera| {
                                         let fcm_token = fcm_token.clone();
                                         let uid = uid.clone();
                                         Box::pin(async move {
@@ -248,13 +261,25 @@ impl PushNotiThread {
                                             r?;
                                             AnyResult::Ok(())
                                         })
-                                    }).await;
+                                    })).await {
+                                        Ok(r) => r,
+                                        Err(_) => Err(anyhow::anyhow!("Timed out registering camera for push notifications")),
+                                    };
                                     let _ = sender.send(r);
                                 });
                             }
                             PnRequest::AddPushID{id} => {
                                 log::trace!("Recived Push Notifcation of ID: {id}");
-                                received_ids.write().await.insert(id);
+                                let mut ids = received_ids.write().await;
+                                ids.insert(id);
+                                // This set is cloned into every listener rebuild
+                                // (at least every 5 minutes) and was never pruned.
+                                // Clearing costs at most a few duplicate
+                                // notifications after the next reconnect.
+                                if ids.len() > 1000 {
+                                    log::debug!("Clearing push notification id cache");
+                                    ids.clear();
+                                }
                             }
                         }
                     }

@@ -37,6 +37,11 @@ impl UseCounter {
                             if noti {
                                 log::trace!("Usecounter: {}->{}", *value, (*value) + 1);
                                 *value += 1;
+                            } else if *value == 0 {
+                                // An unmatched deactivate must not wrap the
+                                // counter to u32::MAX: that would wedge every
+                                // `dropped_users()` waiter permanently
+                                log::error!("Usecounter would go negative; ignoring extra deactivate");
                             } else {
                                 log::trace!("Usecounter: {}->{}", *value, (*value) - 1);
                                 *value -= 1;
