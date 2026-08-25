@@ -37,6 +37,12 @@ use tokio_util::{
 
 const MTU: usize = 1350;
 const UDPDATA_HEADER_SIZE: usize = 20;
+/// How long to wait for a lost packet to be resent before giving up on it
+const MAX_HOLE_WAIT: Duration = Duration::from_secs(3);
+/// Maximum number of out-of-order packets to buffer while waiting for a resend
+const MAX_REORDER_PACKETS: usize = 2048;
+/// Maximum number of unacknowledged sent packets kept for resending
+const MAX_SENT_BUFFER: usize = 512;
 
 pub(crate) type InnerFramed = Framed<Compat<IntoAsyncRead<UdpPayloadSource>>, BcCodex>;
 pub(crate) struct UdpSource {
@@ -302,6 +308,10 @@ struct UdpPayloadInner {
     packets_want: u32,
     sent: BTreeMap<u32, UdpData>,
     recieved: BTreeMap<u32, Vec<u8>>,
+    /// Set when `packets_want` is missing but later packets are buffered.
+    /// Used to give up on packets the camera will never resend, instead of
+    /// buffering the rest of the stream forever behind the hole.
+    hole_since: Option<Instant>,
     /// Offical Client does ack every 10ms if we don't also do this the camera
     /// seems to think we have a poor connection and will abort
     /// This `ack_interval` controls how ofen we do this
@@ -471,6 +481,7 @@ impl UdpPayloadInner {
             packets_want: 0,
             sent: Default::default(),
             recieved: Default::default(),
+            hole_since: None,
             resend_interval: interval(Duration::from_millis(500)), // Offical Client does resend every 500ms
             ack_latency: Default::default(),
             cancel,
@@ -502,6 +513,11 @@ impl UdpPayloadInner {
                     };
                     self.packets_sent += 1;
                     self.sent.insert(udp_data.packet_id, udp_data.clone());
+                    // Bound the resend buffer. If the camera stops ACKing we
+                    // must not hold (and re-send) an ever-growing backlog.
+                    while self.sent.len() > MAX_SENT_BUFFER {
+                        self.sent.pop_first();
+                    }
                     self.socket_in.feed(BcUdp::Data(udp_data)).await?;
                 }
                 Ok(())
@@ -550,10 +566,37 @@ impl UdpPayloadInner {
             },
         }?;
         log::trace!("Send");
-        while let Some(payload) = self.recieved.remove(&self.packets_want) {
-            log::trace!("  + {}", self.packets_want);
-            self.packets_want += 1;
-            self.thread_stream.feed(Ok(payload)).await?;
+        loop {
+            while let Some(payload) = self.recieved.remove(&self.packets_want) {
+                log::trace!("  + {}", self.packets_want);
+                self.packets_want += 1;
+                self.hole_since = None;
+                self.thread_stream.feed(Ok(payload)).await?;
+            }
+            if self.recieved.is_empty() {
+                self.hole_since = None;
+                break;
+            }
+            // Later packets are buffered but `packets_want` is missing.
+            // Wait a little for the camera to resend it, but if it never
+            // comes (the camera's resend window has moved on) skip the hole:
+            // the media parser resyncs on the next frame header, whereas
+            // waiting forever would freeze the stream and buffer the rest of
+            // it in `recieved` without bound.
+            let hole_since = *self.hole_since.get_or_insert_with(Instant::now);
+            if hole_since.elapsed() > MAX_HOLE_WAIT || self.recieved.len() > MAX_REORDER_PACKETS {
+                if let Some((&next_avail, _)) = self.recieved.iter().next() {
+                    log::warn!(
+                        "UDP: giving up on {} lost packet(s); skipping ahead ({} packets were buffered behind the hole)",
+                        next_avail.saturating_sub(self.packets_want),
+                        self.recieved.len()
+                    );
+                    self.packets_want = next_avail;
+                    self.hole_since = None;
+                    continue;
+                }
+            }
+            break;
         }
         log::trace!("recieved: {}", self.recieved.len());
         log::trace!("Flush");

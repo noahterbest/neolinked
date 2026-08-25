@@ -96,6 +96,13 @@ impl BcCamera {
                         why: "Expected binary data but got something else",
                     });
                 }
+                // The loop otherwise only ends when the camera sends the 201
+                // terminator; if that is lost (or unrelated traffic lands on
+                // this message ID) the accumulator must not grow forever
+                const MAX_SNAPSHOT_SIZE: usize = 20 * 1024 * 1024;
+                if result.len() > MAX_SNAPSHOT_SIZE {
+                    return Err(Error::Other("Snapshot data exceeded maximum size"));
+                }
                 log::trace!(
                     "Got packet size is now {} of {}",
                     result.len(),

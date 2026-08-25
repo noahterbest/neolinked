@@ -94,7 +94,13 @@ fn bc_modern_msg<'a>(
     let ext_len = header.payload_offset.unwrap_or_default();
 
     let (buf, ext_buf) = take(ext_len)(buf)?;
-    let payload_len = header.body_len - ext_len;
+    let payload_len = header.body_len.checked_sub(ext_len).ok_or_else(|| {
+        Err::Error(make_error(
+            buf,
+            "Payload offset exceeds body length",
+            ErrorKind::Verify,
+        ))
+    })?;
     let (buf, payload_buf) = take(payload_len)(buf)?;
 
     let decrypted;
@@ -119,7 +125,9 @@ fn bc_modern_msg<'a>(
         // Apply the XML parse function, but throw away the reference to decrypted in the Ok and
         // Err case. This error-error-error thing is the same idiom Nom uses internally.
         let parsed = Extension::try_parse(processed_ext_buf).map_err(|_| {
-            log::error!("Extension buffer: {:?}", processed_ext_buf);
+            // Full buffer only at trace: on a desynced stream this fires at
+            // packet rate and the dump can be hundreds of KB per packet
+            log::trace!("Extension buffer: {:?}", processed_ext_buf);
             Err::Error(make_error(
                 buf,
                 "Unable to parse Extension XML",
@@ -200,7 +208,9 @@ fn bc_modern_msg<'a>(
             }
             let xml = BcXml::try_parse(processed_payload_buf.as_slice()).map_err(|e| {
                 error!("header.msg_id: {}", header.msg_id);
-                error!(
+                // Full buffer only at trace: on a desynced stream this fires
+                // at packet rate and the dump can be hundreds of KB per packet
+                log::trace!(
                     "processed_payload_buf: {:X?}::{:?}",
                     processed_payload_buf,
                     std::str::from_utf8(&processed_payload_buf)
@@ -227,7 +237,12 @@ fn bc_header(buf: &[u8]) -> IResult<&[u8], BcHeader> {
         verify(le_u32, |x| *x == MAGIC_HEADER || *x == MAGIC_HEADER_REV),
     )(buf)?;
     let (buf, msg_id) = error_context("MsgID missing", le_u32)(buf)?;
-    let (buf, body_len) = error_context("BodyLen missing", le_u32)(buf)?;
+    // A corrupted body length must not make the framing layer buffer
+    // gigabytes waiting for data that will never arrive
+    let (buf, body_len) = error_context(
+        "BodyLen implausible",
+        verify(le_u32, |x| *x <= 16 * 1024 * 1024),
+    )(buf)?;
     let (buf, channel_id) = error_context("ChannelID missing", le_u8)(buf)?;
     let (buf, stream_type) = error_context("StreamType missing", le_u8)(buf)?;
     let (buf, msg_num) = error_context("MsgNum missing", le_u16)(buf)?;

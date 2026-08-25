@@ -360,14 +360,13 @@ impl Poller {
                     }
                 }
                 PollCommand::AddHandler(msg_id, handler) => {
-                    match self.subscribers.id.entry(msg_id) {
-                        Entry::Vacant(vac_entry) => {
-                            vac_entry.insert(handler);
-                        }
-                        Entry::Occupied(_) => {
-                            return Err(Error::SimultaneousSubscriptionId { msg_id });
-                        }
-                    };
+                    // Replacing an existing handler is not fatal: erroring here
+                    // would tear down the whole connection, and callers (e.g.
+                    // the floodlight listener) legitimately re-register after
+                    // a task restart since there is no unhandle call on drop.
+                    if self.subscribers.id.insert(msg_id, handler).is_some() {
+                        log::debug!("Replaced existing handler for message ID {msg_id}");
+                    }
                 }
                 PollCommand::RemoveHandler(msg_id) => {
                     self.subscribers.id.remove(&msg_id);

@@ -8,6 +8,13 @@ type IResult<I, O, E = nom::error::VerboseError<I>> = Result<(I, O), nom::Err<E>
 // PAD_SIZE: Media packets use 8 byte padding
 const PAD_SIZE: u32 = 8;
 
+/// Largest plausible media frame payload. Length fields come off the wire;
+/// a corrupted value must not make the parser wait for (and the framing
+/// layer buffer) gigabytes that will never arrive.
+const MAX_PAYLOAD_SIZE: u32 = 32 * 1024 * 1024;
+/// Largest plausible additional-header size on a video frame
+const MAX_ADDITIONAL_HEADER_SIZE: u32 = 4096;
+
 impl BcMedia {
     pub(crate) fn deserialize(buf: &mut BytesMut) -> Result<BcMedia, Error> {
         let (result, len) = match consumed(bcmedia)(buf) {
@@ -167,8 +174,14 @@ fn bcmedia_iframe(buf: &[u8]) -> IResult<&[u8], BcMediaIframe> {
         "Video Type is unrecognised in IFrame",
         verify(take4, |x| matches!(x, "H264" | "H265")),
     )(buf)?;
-    let (buf, payload_size) = le_u32(buf)?;
-    let (buf, additional_header_size) = le_u32(buf)?;
+    let (buf, payload_size) = context(
+        "Video frame payload size is implausible",
+        verify(le_u32, |x| *x <= MAX_PAYLOAD_SIZE),
+    )(buf)?;
+    let (buf, additional_header_size) = context(
+        "Video frame additional header size is implausible",
+        verify(le_u32, |x| *x <= MAX_ADDITIONAL_HEADER_SIZE),
+    )(buf)?;
     let (buf, microseconds) = le_u32(buf)?;
     let (buf, _unknown_b) = le_u32(buf)?;
     let (buf, time) = if additional_header_size >= 4 {
@@ -216,8 +229,14 @@ fn bcmedia_pframe(buf: &[u8]) -> IResult<&[u8], BcMediaPframe> {
         "Video Type is unrecognised in PFrame",
         verify(take4, |x| matches!(x, "H264" | "H265")),
     )(buf)?;
-    let (buf, payload_size) = le_u32(buf)?;
-    let (buf, additional_header_size) = le_u32(buf)?;
+    let (buf, payload_size) = context(
+        "Video frame payload size is implausible",
+        verify(le_u32, |x| *x <= MAX_PAYLOAD_SIZE),
+    )(buf)?;
+    let (buf, additional_header_size) = context(
+        "Video frame additional header size is implausible",
+        verify(le_u32, |x| *x <= MAX_ADDITIONAL_HEADER_SIZE),
+    )(buf)?;
     let (buf, microseconds) = le_u32(buf)?;
     let (buf, _unknown_b) = le_u32(buf)?;
     let (buf, _additional_header) = take(additional_header_size)(buf)?;
@@ -268,7 +287,10 @@ fn bcmedia_aac(buf: &[u8]) -> IResult<&[u8], BcMediaAac> {
 fn bcmedia_adpcm(buf: &[u8]) -> IResult<&[u8], BcMediaAdpcm> {
     const SUB_HEADER_SIZE: u16 = 4;
 
-    let (buf, payload_size) = le_u16(buf)?;
+    let (buf, payload_size) = context(
+        "ADPCM payload size is too small",
+        verify(le_u16, |x| *x >= SUB_HEADER_SIZE),
+    )(buf)?;
     let (buf, _payload_size_b) = le_u16(buf)?;
     let (buf, _magic) = context(
         "ADPCM data magic value is invalid",
