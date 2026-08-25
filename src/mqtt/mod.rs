@@ -150,6 +150,11 @@ pub(crate) async fn main(_: Opt, reactor: NeoReactor) -> Result<()> {
                                     if let Ok(()) = &r {
                                         break r
                                     } else {
+                                        log::debug!("{name}: MQTT camera listener failed; restarting: {r:?}");
+                                        // Backoff: every listen_on_camera attempt
+                                        // opens fresh broker connections, so a
+                                        // fast-failing camera must not hot-loop
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                                         continue;
                                     }
                                 }
@@ -157,11 +162,17 @@ pub(crate) async fn main(_: Opt, reactor: NeoReactor) -> Result<()> {
                         }
                     }
 
-                    for (running_name, token) in cameras.iter() {
-                        if ! config_names.contains(running_name) {
+                    // Cancel AND remove dropped cameras: leaving the entry in
+                    // the map meant a camera that was removed and re-added to
+                    // the config could never be started again
+                    cameras.retain(|running_name, token| {
+                        if !config_names.contains(running_name) {
                             token.cancel();
+                            false
+                        } else {
+                            true
                         }
-                    }
+                    });
                 }
             } => v,
         }
@@ -353,23 +364,34 @@ async fn listen_on_camera(camera: NeoInstance, mqtt_instance: MqttInstance) -> R
                         tokio::select! {
                             v = async {
                                 log::debug!("Listening to message on {}", mqtt_msg.get_name());
-                                while let Ok(msg) = mqtt_msg.recv().await {
-                                    let mqtt_msg = mqtt_msg.resubscribe().await?;
-                                    let camera_msg = camera_msg.clone();
-                                    let tx = tx.clone();
-                                    let cancel_msg = cancel_msg.clone();
-                                    set_msg.spawn(async move {
-                                        tokio::select!{
-                                            _ = cancel_msg.cancelled() => AnyResult::Ok(()),
-                                            v = async {
-                                                let res = handle_mqtt_message(msg, &mqtt_msg, &camera_msg).await;
-                                                if res.is_err() {
-                                                    tx.send(res).await?;
+                                loop {
+                                    tokio::select!{
+                                        msg = mqtt_msg.recv() => {
+                                            let Ok(msg) = msg else {
+                                                break;
+                                            };
+                                            let mqtt_msg = mqtt_msg.resubscribe().await?;
+                                            let camera_msg = camera_msg.clone();
+                                            let tx = tx.clone();
+                                            let cancel_msg = cancel_msg.clone();
+                                            set_msg.spawn(async move {
+                                                tokio::select!{
+                                                    _ = cancel_msg.cancelled() => AnyResult::Ok(()),
+                                                    v = async {
+                                                        let res = handle_mqtt_message(msg, &mqtt_msg, &camera_msg).await;
+                                                        if res.is_err() {
+                                                            tx.send(res).await?;
+                                                        }
+                                                        AnyResult::Ok(())
+                                                    } => v,
                                                 }
-                                                AnyResult::Ok(())
-                                            } => v,
-                                        }
-                                    });
+                                            });
+                                        },
+                                        // Reap finished handler tasks; a JoinSet
+                                        // that is never joined keeps the record of
+                                        // every message ever handled
+                                        Some(_) = set_msg.join_next() => {},
+                                    }
                                 }
                                 AnyResult::Ok(())
                             } => {

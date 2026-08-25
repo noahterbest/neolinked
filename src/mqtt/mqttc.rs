@@ -220,7 +220,11 @@ impl<'a> MqttBackend<'a> {
                                                 let _ = tx.send(Ok(()));
                                             },
                                             Err(rumqttc::ClientError::Request(_)) | Err(rumqttc::ClientError::TryRequest(_)) => {
-                                                // Requeue it
+                                                // Requeue it after a short delay:
+                                                // when the client is gone this error
+                                                // is instant and an immediate requeue
+                                                // becomes a CPU-pinning hot loop
+                                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                                 outgoing_tx.send(MqttRequest::Send(msg, tx)).await?;
                                             }
                                         };
@@ -238,8 +242,12 @@ impl<'a> MqttBackend<'a> {
                                                 let _ = tx.send(Ok(()));
                                             },
                                             Err(rumqttc::ClientError::Request(_)) | Err(rumqttc::ClientError::TryRequest(_)) => {
-                                                // Requeue it
-                                                outgoing_tx.send(MqttRequest::Send(msg, tx)).await?;
+                                                // Requeue it (as retained — it was a
+                                                // retained send) after a short delay
+                                                // to avoid a hot loop when the client
+                                                // is gone
+                                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                                outgoing_tx.send(MqttRequest::SendRetained(msg, tx)).await?;
                                             }
                                         };
                                         v?;
