@@ -46,6 +46,22 @@ pub(crate) enum PnRequest {
     },
 }
 
+/// How long to wait before the next registration/connection attempt.
+///
+/// Google decommissioned the API this feature depends on, so for most users
+/// every attempt fails. Retrying on a fixed short timer means a permanent hot
+/// loop of TLS connections for a feature that cannot succeed, so back off
+/// hard once it starts failing.
+fn retry_backoff(consecutive_failures: u32) -> Duration {
+    const BASE_SECS: u64 = 3;
+    const MAX_SECS: u64 = 15 * 60;
+    if consecutive_failures == 0 {
+        return Duration::from_secs(BASE_SECS);
+    }
+    let secs = BASE_SECS.saturating_mul(1u64 << consecutive_failures.min(10));
+    Duration::from_secs(secs.min(MAX_SECS))
+}
+
 impl PushNotiThread {
     pub(crate) async fn new() -> AnyResult<Self> {
         let (pn_watcher, _) = watch(None);
@@ -62,9 +78,11 @@ impl PushNotiThread {
         sender: &MpscSender<PnRequest>,
         pn_request_rx: &mut MpscReceiver<PnRequest>,
     ) -> AnyResult<()> {
+        let mut consecutive_failures: u32 = 0;
         loop {
-            // Short wait on start/retry
-            sleep(Duration::from_secs(3)).await;
+            // Wait before (re)connecting. This grows while attempts keep
+            // failing so an unreachable push service cannot spin this loop.
+            sleep(retry_backoff(consecutive_failures)).await;
 
             let sender_id = "743639030586"; // andriod
                                             // let sender_id = "696841269229"; // ios
@@ -131,7 +149,13 @@ impl PushNotiThread {
                         registration
                     }
                     Err(e) => {
-                        log::warn!("Issue connecting to push notifications server: {:?}", e);
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        log::warn!(
+                            "Issue connecting to push notifications server (attempt {}, next retry in {:?}): {:?}",
+                            consecutive_failures,
+                            retry_backoff(consecutive_failures),
+                            e
+                        );
                         continue;
                     }
                 }
@@ -177,7 +201,7 @@ impl PushNotiThread {
             }
 
             let received_ids = self.received_ids.clone();
-            tokio::select! {
+            let listener_was_healthy = tokio::select! {
                 v = async {
                     loop {
                         let mut listener = FcmPushListener::create(
@@ -196,9 +220,10 @@ impl PushNotiThread {
                             received_ids.read().await.iter().cloned().collect(),
                         );
                         let r = timeout(Duration::from_secs(60*5), listener.connect()).await;
-                        match &r {
+                        match r {
                             Ok(Ok(_)) => {
                                 log::debug!("Push notification listener reported normal shutdown");
+                                break true;
                             }
                             Ok(Err(e)) => {
                                 use fcm_push_listener::Error::*;
@@ -215,18 +240,18 @@ impl PushNotiThread {
                                     }
                                     _ => {
                                         log::debug!("Error on push notification listener: {:?}", e);
-                                        // This sort of error can be a network error
-                                        // Wait for a little longer
-                                        sleep(Duration::from_secs(30)).await;
                                     }
                                 }
+                                // The retry delay is applied at the top of the
+                                // outer loop and grows while failures persist
+                                break false;
                             },
                             Err(_) => {
-                                // timeout
+                                // Stayed connected for the whole window, which is
+                                // the healthy path: rebuild the listener and go again
                                 continue;
                             }
-                        };
-                        break;
+                        }
                     }
                 } => v,
                 v = async {
@@ -289,6 +314,11 @@ impl PushNotiThread {
                     break AnyResult::Ok(());
                 },
             };
+            if listener_was_healthy {
+                consecutive_failures = 0;
+            } else {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+            }
         }
     }
 }

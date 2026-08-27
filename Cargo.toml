@@ -1,7 +1,7 @@
 [package]
 name = "neolink"
 description = "A standards-compliant bridge to Reolink IP cameras"
-version = "0.6.4"
+version = "0.6.5"
 authors = ["George Hilliard <thirtythreeforty@gmail.com>", "Andrew King <sheepchaan@gmail.com>"]
 edition = "2018"
 license = "AGPL-3.0-or-later"
@@ -45,6 +45,9 @@ validator = {version="0.18.1", features = ["derive"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = ["gstreamer"]

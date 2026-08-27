@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "neolink"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "base64 0.22.0",
@@ -1883,6 +1883,7 @@ dependencies = [
  "gstreamer-rtsp",
  "gstreamer-rtsp-server",
  "heck 0.5.0",
+ "libc",
  "log",
  "md5",
  "neolink_core",

@@ -141,7 +141,11 @@ impl BcCamera {
     /// Try to connect to the camera via appropaite methods and return
     /// the location that should be used
     async fn find_camera(options: &BcCameraOpt) -> Result<CameraLocation> {
-        let discovery = Discovery::new().await?;
+        // NOTE: the discovery socket is created lazily further down, only if a
+        // UDP discovery method is actually going to be used. Building it up
+        // front cost a bound UDP socket plus its reader/writer tasks on every
+        // connection attempt even for plain TCP cameras, which is pure
+        // descriptor churn during a reconnect loop.
         if let ConnectionProtocol::Tcp | ConnectionProtocol::TcpUdp = options.protocol {
             let mut sockets = vec![];
             match options.port {
@@ -161,7 +165,7 @@ impl BcCamera {
                 info!("{}: Trying TCP discovery", options.name);
                 for socket in sockets.drain(..) {
                     let channel_id: u8 = options.channel_id;
-                    if let Ok(addr) = discovery.check_tcp(socket, channel_id).await.map(|_| {
+                    if let Ok(addr) = Discovery::check_tcp(socket, channel_id).await.map(|_| {
                         info!("{}: TCP Discovery success at {:?}", options.name, &socket);
                         socket
                     }) {
@@ -174,6 +178,7 @@ impl BcCamera {
         if let (Some(uid), ConnectionProtocol::Udp | ConnectionProtocol::TcpUdp) =
             (options.uid.as_ref(), options.protocol)
         {
+            let discovery = Discovery::new().await?;
             let mut sockets = vec![];
             match options.port {
                 None | Some(2015) | Some(2018) => {

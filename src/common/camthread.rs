@@ -105,7 +105,11 @@ impl NeoCamThread {
     // A watch sender is used to send the new camera
     // whenever it changes
     pub(crate) async fn run(&mut self) -> AnyResult<()> {
-        const MAX_BACKOFF: Duration = Duration::from_secs(5);
+        // Reconnecting every few seconds through a long outage is pure churn:
+        // each attempt costs sockets and floods the log. The backoff resets as
+        // soon as a connection survives a minute, so normal operation is
+        // unaffected.
+        const MAX_BACKOFF: Duration = Duration::from_secs(30);
         const MIN_BACKOFF: Duration = Duration::from_millis(50);
 
         let mut backoff = MIN_BACKOFF;
@@ -176,7 +180,16 @@ impl NeoCamThread {
                         }
                         _ => {
                             // Non fatal
-                            log::warn!("{name}: Connection Lost: {:?}", e);
+                            if crate::resources::is_fd_exhaustion(&e) {
+                                // No amount of reconnecting fixes this; say so
+                                // plainly rather than looking like a network fault
+                                log::error!(
+                                    "{name}: Out of file descriptors ({}). This is a                                      process wide limit, not a camera fault, and the                                      process cannot recover on its own: it needs a                                      restart, and a higher limit or a leak fix.",
+                                    crate::resources::fd_usage_summary()
+                                );
+                            } else {
+                                log::warn!("{name}: Connection Lost: {:?}", e);
+                            }
                             log::info!("{name}: Attempt reconnect in {:?}", backoff);
                             sleep(backoff).await;
                             backoff *= 2;

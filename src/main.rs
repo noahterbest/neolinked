@@ -46,6 +46,7 @@ mod mqtt;
 mod pir;
 mod ptz;
 mod reboot;
+mod resources;
 #[cfg(feature = "gstreamer")]
 mod rtsp;
 mod services;
@@ -70,6 +71,14 @@ async fn main() -> Result<()> {
         env!("NEOLINK_VERSION"),
         env!("NEOLINK_PROFILE")
     );
+
+    // Containers routinely start us with a low file descriptor soft limit even
+    // though the hard limit is far higher. Take the headroom: descriptor
+    // exhaustion wedges the process permanently.
+    if let Some((soft, hard)) = resources::raise_fd_limit() {
+        info!("Open file limit: {} (hard limit {})", soft, hard);
+    }
+    resources::spawn_fd_monitor();
 
     let opt = Opt::parse();
 

@@ -48,6 +48,11 @@ image from.**
   remotely triggerable crash, bounded snapshot and push-notification handling,
   and a number of background tasks that previously leaked per client
   connection.
+- **File descriptor exhaustion.** The process now raises its open file limit to
+  the hard limit at startup, warns in the log as descriptor use climbs, and
+  says so plainly if it ever runs out instead of reporting it as a camera
+  fault. Push notifications no longer retry on a fixed 3 second timer, and no
+  longer create a discovery socket per TCP reconnect.
 - **Build and delivery.** CI builds `amd64` and `arm64` and publishes images to
   GitHub Container Registry.
 
@@ -180,9 +185,10 @@ using the terminal in the same folder the neolink binary is in.
 - **Give cameras an `address` where you can.** A camera reached by
   `address = "192.168.1.10:9000"` connects over TCP and skips the UDP transport
   entirely, which is the more robust path.
-- **Turn off push notifications** with `push_notifications = false` in each
-  `[[cameras]]` section. Google removed the API this relied on, so it can no
-  longer wake cameras — leaving it enabled only produces retry traffic.
+- **Push notifications default to off** in this fork. Google removed the API
+  they relied on, so enabling them mostly produces failing retry traffic. Set
+  `push_notifications = true` in a `[[cameras]]` section only if they still
+  work for you.
 - **Point one consumer at Neolinked** and let it fan out to viewers (Frigate's
   restream or go2rtc, for example). Each direct client still costs a camera
   session, and cameras allow only a few.

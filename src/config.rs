@@ -213,7 +213,10 @@ pub(crate) struct CameraConfig {
     )]
     pub(crate) max_discovery_retries: usize,
 
-    #[serde(default = "default_true", alias = "push", alias = "push_noti")]
+    // Defaults to off: Google decommissioned the API this depends on, so for
+    // most cameras it can only produce a permanent failing retry loop. Set it
+    // to true explicitly if push notifications still work for you.
+    #[serde(default = "default_false", alias = "push", alias = "push_noti")]
     pub(crate) push_notifications: bool,
 
     #[serde(default = "default_false", alias = "idle", alias = "idle_disc")]

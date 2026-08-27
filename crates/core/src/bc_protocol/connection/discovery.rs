@@ -1076,7 +1076,12 @@ impl Discovery {
     // Check if TCP is possible
     //
     // To do this we send a dummy login  and see if it replies with any BC packet
-    pub(crate) async fn check_tcp(&self, addr: SocketAddr, channel_id: u8) -> Result<()> {
+    /// Probe a TCP address to see if a Baichuan camera answers there.
+    ///
+    /// This uses no discovery state, so it deliberately does not take `self`:
+    /// probing a known address must not require binding a discovery socket
+    /// that we would never send anything on.
+    pub(crate) async fn check_tcp(addr: SocketAddr, channel_id: u8) -> Result<()> {
         let username = "admin";
         let password = Some("123456");
         let mut tcp_source =
