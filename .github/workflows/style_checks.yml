@@ -2,6 +2,9 @@ name: Style
 
 on: [push, pull_request]
 
+env:
+  rust_version: "1.82.0"
+
 jobs:
   pre_job:
     # continue-on-error: true # Uncomment once integration is finished
@@ -29,20 +32,23 @@ jobs:
           sudo apt update
           sudo apt install -y aptitude
           sudo aptitude install -y libgstrtspserver-1.0-dev libgstreamer1.0-dev libgtk2.0-dev protobuf-compiler
-      - name: Install nightly rust
+      # Pinned stable rather than nightly: an unpinned nightly breaks whenever a
+      # transitive dependency stops compiling on the newest compiler, which has
+      # nothing to do with this code (rustix 0.37 vs current nightly, for one).
+      - name: Install rust
         run: |
-          rustup toolchain install nightly --component clippy
-          rustup override set nightly
+          rustup toolchain install "${{ env.rust_version }}" --component clippy
+          rustup override set "${{ env.rust_version }}"
       - name: Run clippy manually
         run: |
           echo "All Features"
-          cargo +nightly clippy --workspace --all-targets --all-features || exit 1
+          cargo clippy --workspace --all-targets --all-features || exit 1
           echo "No Features"
-          cargo +nightly clippy --workspace --all-targets --no-default-features || exit 1
+          cargo clippy --workspace --all-targets --no-default-features || exit 1
           echo "Gstreamer Only"
-          cargo +nightly clippy --workspace --all-targets --no-default-features --features=gstreamer || exit 1
+          cargo clippy --workspace --all-targets --no-default-features --features=gstreamer || exit 1
           echo "Pushnoti Only"
-          cargo +nightly clippy --workspace --all-targets --no-default-features --features=pushnoti || exit 1
+          cargo clippy --workspace --all-targets --no-default-features --features=pushnoti || exit 1
 
   check_fmt:
     needs: pre_job
@@ -51,13 +57,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install nightly rust
+      - name: Install rust
         run: |
-          rustup toolchain install nightly --component rustfmt
-          rustup override set nightly
+          rustup toolchain install "${{ env.rust_version }}" --component rustfmt
+          rustup override set "${{ env.rust_version }}"
       - name: rustfmt
         run: |
-          cargo +nightly fmt --all -- --check
+          cargo fmt --all -- --check
 
   check_lua:
     needs: pre_job
