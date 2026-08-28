@@ -6,7 +6,10 @@ exit_func() {
 }
 trap exit_func TERM INT
 
-ulimit -n 65535
+# Best effort only: raising the *hard* limit needs privileges the container
+# usually does not have, and neolink raises its own soft limit to the hard
+# limit at startup regardless. Don't fail or warn if this is not permitted.
+ulimit -n 65535 2>/dev/null || true
 
 echo "Running: ${*}"
 "$@"

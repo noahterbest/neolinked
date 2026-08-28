@@ -98,6 +98,7 @@ pub(crate) fn spawn_fd_monitor() {
     tokio::task::spawn(async move {
         let mut warned_at = 0u8;
         let mut peak = 0u64;
+        let mut ticks = 0u64;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -112,7 +113,14 @@ pub(crate) fn spawn_fd_monitor() {
                 peak = open;
             }
             let pct = ((open as f64 / limit as f64) * 100.0) as u8;
-            debug!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
+            ticks += 1;
+            // Hourly at info so a slow leak is visible in a normal log without
+            // having to enable debug logging or exec into the container
+            if ticks % 60 == 0 {
+                info!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
+            } else {
+                debug!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
+            }
             // Warn once per threshold crossed rather than every minute
             for threshold in [50u8, 75, 90] {
                 if pct >= threshold && warned_at < threshold {

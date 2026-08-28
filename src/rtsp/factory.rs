@@ -288,7 +288,12 @@ pub(super) async fn make_factory(
                                         }
                                     }
                                     Err(e) => {
-                                        log::info!("Failed to send to source: {e:?}");
+                                        // Normal when a client goes away and the
+                                        // pipeline is torn down under us; the feed
+                                        // ends here and the camera stream is released
+                                        log::debug!(
+                                            "{name}::{stream}: Ending feed, pipeline is gone: {e:?}"
+                                        );
                                     }
                                 }
                                 r?;
