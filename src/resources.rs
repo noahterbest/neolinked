@@ -115,18 +115,13 @@ pub(crate) fn spawn_fd_monitor() {
             let pct = ((open as f64 / limit as f64) * 100.0) as u8;
             ticks += 1;
             // Hourly at info so a slow leak is visible in a normal log without
-            // having to enable debug logging or exec into the container.
-            // Once usage is clearly abnormal, include the breakdown by type so
-            // the log identifies WHAT is leaking, not just that something is.
+            // having to enable debug logging or exec into the container. The
+            // breakdown by type is always included so the log identifies WHAT
+            // is leaking, not just that something is — a leak can be obvious
+            // long before it is a large percentage of the limit.
             if ticks % 60 == 0 {
-                if pct >= 5 {
-                    let types = fd_breakdown().unwrap_or_default();
-                    info!(
-                        "Open file descriptors: {open} of {limit} ({pct}%), peak {peak} [{types}]"
-                    );
-                } else {
-                    info!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
-                }
+                let types = fd_breakdown().unwrap_or_default();
+                info!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak} [{types}]");
             } else {
                 debug!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
             }

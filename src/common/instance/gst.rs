@@ -217,14 +217,22 @@ impl NeoInstance {
                                         media_tx.send(frame??).await?;
                                     }
                                     Err(_) => {
-                                        if media_tx.is_closed() {
-                                            // No consumer any more; just stop
-                                            return AnyResult::Ok(());
-                                        }
                                         // Watchdog: the connection keepalives can
                                         // stay healthy while the media path is
                                         // wedged. Force a full reconnect of the
                                         // camera rather than freezing forever.
+                                        //
+                                        // This must happen EVEN IF our consumer
+                                        // has already given up: the wedge lives
+                                        // in the camera session, not in this
+                                        // consumer, so without a reset it greets
+                                        // every future client attempt too. (Seen
+                                        // in production as an endless 30s
+                                        // reject-retry loop that never healed,
+                                        // because the client was always rejected
+                                        // moments before this watchdog fired and
+                                        // an is_closed early-return then skipped
+                                        // the reset.)
                                         //
                                         // Every step is bounded and the teardown
                                         // is CONFIRMED before handing control to
@@ -232,12 +240,15 @@ impl NeoInstance {
                                         // disconnect can be missed, after which
                                         // the retry loop waits forever on a
                                         // camera change that never comes while
-                                        // clients hammer the dead stream —
-                                        // observed in production as a one-shot
-                                        // watchdog warning followed by a linear
-                                        // descriptor leak until exhaustion.
+                                        // clients hammer the dead stream.
+                                        let consumer_gone = media_tx.is_closed();
                                         log::warn!(
-                                            "{name}::{stream:?}: No frames from the camera for 30s while streaming; forcing a reconnect"
+                                            "{name}::{stream:?}: No frames from the camera for 30s while streaming; forcing a reconnect{}",
+                                            if consumer_gone {
+                                                " (no client waiting; resetting the camera for the next one)"
+                                            } else {
+                                                ""
+                                            }
                                         );
                                         let _ = tokio::time::timeout(
                                             tokio::time::Duration::from_secs(5),
@@ -264,6 +275,11 @@ impl NeoInstance {
                                                 watchdog_camera.connect(),
                                             )
                                             .await;
+                                            if consumer_gone {
+                                                // Camera reset for the next
+                                                // client; nothing left to serve
+                                                return AnyResult::Ok(());
+                                            }
                                             return Err(
                                                 neolink_core::Error::TimeoutDisconnected.into()
                                             );
@@ -281,6 +297,9 @@ impl NeoInstance {
                                             watchdog_camera.connect(),
                                         )
                                         .await;
+                                        if consumer_gone {
+                                            return AnyResult::Ok(());
+                                        }
                                     }
                                 }
                             }
