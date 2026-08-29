@@ -190,6 +190,7 @@ impl NeoInstance {
         let (media_tx, media_rx) = tokio::sync::mpsc::channel(100);
         let config = self.config().await?.borrow().clone();
         let strict = config.strict;
+        let name = config.name.clone();
         let thread_camera = self.clone();
         let watchdog_camera = self.clone();
         tokio::task::spawn(
@@ -198,6 +199,7 @@ impl NeoInstance {
                     .run_task(move |cam| {
                         let media_tx = media_tx.clone();
                         let watchdog_camera = watchdog_camera.clone();
+                        let name = name.clone();
                         Box::pin(async move {
                             let mut media_stream = cam.start_video(stream, 0, strict).await?;
                             log::trace!("Camera started");
@@ -223,15 +225,62 @@ impl NeoInstance {
                                         // stay healthy while the media path is
                                         // wedged. Force a full reconnect of the
                                         // camera rather than freezing forever.
+                                        //
+                                        // Every step is bounded and the teardown
+                                        // is CONFIRMED before handing control to
+                                        // the retry loop. A fire-and-forget
+                                        // disconnect can be missed, after which
+                                        // the retry loop waits forever on a
+                                        // camera change that never comes while
+                                        // clients hammer the dead stream —
+                                        // observed in production as a one-shot
+                                        // watchdog warning followed by a linear
+                                        // descriptor leak until exhaustion.
                                         log::warn!(
-                                            "No frames from the camera for 30s while streaming; forcing a reconnect"
+                                            "{name}::{stream:?}: No frames from the camera for 30s while streaming; forcing a reconnect"
                                         );
-                                        let _ = media_stream.shutdown().await;
-                                        let _ = watchdog_camera.disconnect().await;
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(1))
+                                        let _ = tokio::time::timeout(
+                                            tokio::time::Duration::from_secs(5),
+                                            watchdog_camera.disconnect(),
+                                        )
+                                        .await;
+                                        let mut camera_gone = watchdog_camera.camera();
+                                        let torn_down = tokio::time::timeout(
+                                            tokio::time::Duration::from_secs(10),
+                                            camera_gone.wait_for(|cam| cam.upgrade().is_none()),
+                                        )
+                                        .await
+                                        .is_ok();
+                                        if torn_down {
+                                            // Best-effort cleanup of the old
+                                            // stream now that its camera is gone
+                                            let _ = tokio::time::timeout(
+                                                tokio::time::Duration::from_secs(5),
+                                                media_stream.shutdown(),
+                                            )
                                             .await;
-                                        let _ = watchdog_camera.connect().await;
-                                        return Err(neolink_core::Error::TimeoutDisconnected.into());
+                                            let _ = tokio::time::timeout(
+                                                tokio::time::Duration::from_secs(5),
+                                                watchdog_camera.connect(),
+                                            )
+                                            .await;
+                                            return Err(
+                                                neolink_core::Error::TimeoutDisconnected.into()
+                                            );
+                                        }
+                                        // The camera thread did not observe the
+                                        // disconnect. Restore the intended state
+                                        // and stay in this loop so the watchdog
+                                        // fires again in 30s rather than parking
+                                        // the stream forever.
+                                        log::error!(
+                                            "{name}::{stream:?}: Camera teardown was not observed within 10s; will keep retrying"
+                                        );
+                                        let _ = tokio::time::timeout(
+                                            tokio::time::Duration::from_secs(5),
+                                            watchdog_camera.connect(),
+                                        )
+                                        .await;
                                     }
                                 }
                             }

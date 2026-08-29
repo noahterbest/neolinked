@@ -178,18 +178,39 @@ pub(super) async fn make_factory(
                         let mut buffer = vec![];
                         let mut frame_count = 0usize;
 
-                        let mut stream_config = StreamConfig::new(&camera, stream).await?;
-                        while let Some(media) = media_rx.recv().await {
-                            stream_config.update_from_media(&media);
-                            buffer.push(media);
-                            if frame_count > 10
-                                || (stream_config.vid_type.is_some()
-                                    && stream_config.aud_type.is_some())
-                            {
-                                break;
+                        // Both of these can hang indefinitely against a wedged
+                        // camera, and create_element is blocking a gstreamer
+                        // server thread on our reply: bound them so a failed
+                        // client attempt cleans up instead of pinning a server
+                        // thread (plus the client's resources) per attempt.
+                        let learn =
+                            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                                let mut stream_config = StreamConfig::new(&camera, stream).await?;
+                                while let Some(media) = media_rx.recv().await {
+                                    stream_config.update_from_media(&media);
+                                    buffer.push(media);
+                                    if frame_count > 10
+                                        || (stream_config.vid_type.is_some()
+                                            && stream_config.aud_type.is_some())
+                                    {
+                                        break;
+                                    }
+                                    frame_count += 1;
+                                }
+                                AnyResult::Ok(stream_config)
+                            })
+                            .await;
+                        let stream_config = match learn {
+                            Ok(v) => v?,
+                            Err(_) => {
+                                // Dropping `reply` makes create_element reject
+                                // this client instead of blocking forever
+                                log::warn!(
+                                    "{name}::{stream}: Camera did not deliver initial frames within 30s; rejecting this client"
+                                );
+                                return AnyResult::Ok(());
                             }
-                            frame_count += 1;
-                        }
+                        };
 
                         log::trace!("{name}::{stream}: Building the pipeline");
                         // Build the right video pipeline

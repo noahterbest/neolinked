@@ -115,9 +115,18 @@ pub(crate) fn spawn_fd_monitor() {
             let pct = ((open as f64 / limit as f64) * 100.0) as u8;
             ticks += 1;
             // Hourly at info so a slow leak is visible in a normal log without
-            // having to enable debug logging or exec into the container
+            // having to enable debug logging or exec into the container.
+            // Once usage is clearly abnormal, include the breakdown by type so
+            // the log identifies WHAT is leaking, not just that something is.
             if ticks % 60 == 0 {
-                info!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
+                if pct >= 5 {
+                    let types = fd_breakdown().unwrap_or_default();
+                    info!(
+                        "Open file descriptors: {open} of {limit} ({pct}%), peak {peak} [{types}]"
+                    );
+                } else {
+                    info!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
+                }
             } else {
                 debug!("Open file descriptors: {open} of {limit} ({pct}%), peak {peak}");
             }
@@ -125,8 +134,9 @@ pub(crate) fn spawn_fd_monitor() {
             for threshold in [50u8, 75, 90] {
                 if pct >= threshold && warned_at < threshold {
                     warned_at = threshold;
+                    let types = fd_breakdown().unwrap_or_default();
                     warn!(
-                        "Open file descriptors at {pct}% of the limit ({open} of {limit}). \
+                        "Open file descriptors at {pct}% of the limit ({open} of {limit}) [{types}]. \
                          If this keeps climbing the process will start failing with \
                          `Too many open files`; please report it with your config."
                     );
@@ -167,5 +177,47 @@ pub(crate) fn fd_usage_summary() -> String {
         (Some(open), Some(limit)) => format!("{open} open of a limit of {limit}"),
         (None, Some(limit)) => format!("limit is {limit}"),
         _ => "unknown".to_string(),
+    }
+}
+
+/// Classify this process's open descriptors by type, when knowable.
+///
+/// This is what turns "we ran out of descriptors" into "we know what we ran
+/// out of": sockets point at connection handling, pipes at GStreamer/GLib
+/// internals (GstPoll/GWakeup socketpairs), anon inodes at event loops.
+pub(crate) fn fd_breakdown() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let entries = std::fs::read_dir("/proc/self/fd").ok()?;
+        let mut sockets = 0u64;
+        let mut pipes = 0u64;
+        let mut anon = 0u64;
+        let mut files = 0u64;
+        let mut other = 0u64;
+        for entry in entries.flatten() {
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                other += 1;
+                continue;
+            };
+            let target = target.to_string_lossy().into_owned();
+            if target.starts_with("socket:") {
+                sockets += 1;
+            } else if target.starts_with("pipe:") {
+                pipes += 1;
+            } else if target.starts_with("anon_inode:") {
+                anon += 1;
+            } else if target.starts_with('/') {
+                files += 1;
+            } else {
+                other += 1;
+            }
+        }
+        Some(format!(
+            "sockets: {sockets}, pipes: {pipes}, anon: {anon}, files: {files}, other: {other}"
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }
